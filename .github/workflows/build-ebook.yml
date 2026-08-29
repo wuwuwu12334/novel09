@@ -1,0 +1,52 @@
+name: Build ebook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chapters/**'
+      - 'tools/build_epub.py'
+      - '.github/workflows/build-ebook.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build EPUB and TXT
+        run: python3 tools/build_epub.py
+
+      - name: Verify EPUB
+        run: |
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          p = Path('dist/novel09_全文_1-450章.epub')
+          assert p.exists() and p.stat().st_size > 0
+          with zipfile.ZipFile(p) as z:
+              names = set(z.namelist())
+              assert 'mimetype' in names
+              assert 'META-INF/container.xml' in names
+              assert 'OEBPS/content.opf' in names
+              assert 'OEBPS/nav.xhtml' in names
+              assert 'OEBPS/ch001.xhtml' in names
+              assert 'OEBPS/ch450.xhtml' in names
+              assert len([n for n in names if n.startswith('OEBPS/ch') and n.endswith('.xhtml')]) == 450
+          print('EPUB verification passed')
+          PY
+
+      - name: Upload ebook artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel09-ebook
+          path: |
+            dist/novel09_全文_1-450章.epub
+            dist/novel09_全文_1-450章.txt
+          if-no-files-found: error
+          retention-days: 30
