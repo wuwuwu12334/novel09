@@ -5,6 +5,7 @@ import html
 import re
 import uuid
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -24,6 +25,20 @@ VOLUMES = [
     (371, 412, "第七卷"),
     (413, 450, "第八卷·终局"),
 ]
+
+# 仓库中 311—320 章存在两套同编号草稿。电子书采用后写、并与 321 章及后续正文连续的正式版本。
+CANONICAL_OVERRIDES = {
+    311: "311_提前三天.md",
+    312: "312_不是临时失手.md",
+    313: "313_楚维安留下的账.md",
+    314: "314_三枚针.md",
+    315: "315_她当年知道多少.md",
+    316: "316_谢临川最后留下的东西.md",
+    317: "317_陆沉舟的那句话.md",
+    318: "318_旧案责任表.md",
+    319: "319_正式撤判.md",
+    320: "320_顾玄策的判决.md",
+}
 
 CSS = """
 html { writing-mode: horizontal-tb; }
@@ -51,6 +66,45 @@ def chapter_number(path: Path) -> int:
     if not m:
         raise ValueError(path.name)
     return int(m.group(1))
+
+
+def select_canonical_chapters() -> list[Path]:
+    candidates = sorted(CHAPTER_DIR.glob("[0-9][0-9][0-9]_*.md"))
+    if not candidates:
+        raise SystemExit("No chapter files found")
+
+    grouped: dict[int, list[Path]] = defaultdict(list)
+    for p in candidates:
+        grouped[chapter_number(p)].append(p)
+
+    missing = [n for n in range(1, 451) if n not in grouped]
+    if missing:
+        raise SystemExit(f"Missing chapters: {missing}")
+
+    chapters: list[Path] = []
+    for n in range(1, 451):
+        options = grouped[n]
+        if n in CANONICAL_OVERRIDES:
+            wanted = CANONICAL_OVERRIDES[n]
+            matches = [p for p in options if p.name == wanted]
+            if len(matches) != 1:
+                raise SystemExit(
+                    f"Canonical chapter {n} not found exactly once: {wanted}; "
+                    f"available={[p.name for p in options]}"
+                )
+            chapters.append(matches[0])
+        else:
+            if len(options) != 1:
+                raise SystemExit(
+                    f"Unexpected duplicate chapter {n}: {[p.name for p in options]}. "
+                    "Add an explicit canonical override before building."
+                )
+            chapters.append(options[0])
+
+    nums = [chapter_number(p) for p in chapters]
+    if nums != list(range(1, 451)) or len(chapters) != 450:
+        raise SystemExit("Canonical chapter selection is not exactly 1..450")
+    return chapters
 
 
 def clean_inline(s: str) -> str:
@@ -133,26 +187,10 @@ def render_chapter(title: str, blocks) -> str:
     return "\n".join(out)
 
 
-def volume_for(n: int):
-    for start, end, name in VOLUMES:
-        if start <= n <= end:
-            return start, end, name
-    return None
-
-
 def main():
     DIST.mkdir(exist_ok=True)
-    chapters = sorted(CHAPTER_DIR.glob("[0-9][0-9][0-9]_*.md"), key=chapter_number)
-    if not chapters:
-        raise SystemExit("No chapter files found")
-
+    chapters = select_canonical_chapters()
     nums = [chapter_number(p) for p in chapters]
-    expected = list(range(nums[0], nums[-1] + 1))
-    missing = sorted(set(expected) - set(nums))
-    if missing:
-        raise SystemExit(f"Missing chapters: {missing}")
-    if nums[0] != 1 or nums[-1] != 450:
-        raise SystemExit(f"Expected chapters 1..450, got {nums[0]}..{nums[-1]}")
 
     parsed = []
     txt_parts = []
@@ -169,6 +207,9 @@ def main():
             else:
                 plain.extend([re.sub(r"[*`#>]", "", text), ""])
         txt_parts.append("\n".join(plain).strip())
+
+    if len(parsed) != 450 or [n for n, _, _ in parsed] != list(range(1, 451)):
+        raise SystemExit("Parsed chapter list is not exactly 1..450")
 
     txt_path = DIST / f"{BOOK_TITLE}_全文_1-450章.txt"
     txt_path.write_text("\n\n\n".join(txt_parts) + "\n", encoding="utf-8")
@@ -218,7 +259,11 @@ def main():
 <p>正文 · 第1—450章</p>
 </div>'''
 
-    nav_lines = ['<nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops" id="toc">', '<h1>目录</h1>', '<ol>']
+    nav_lines = [
+        '<nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops" id="toc">',
+        '<h1>目录</h1>',
+        '<ol>'
+    ]
     for start, end, vname in VOLUMES:
         nav_lines.append(f'<li><span>{html.escape(vname)}（第{start}—{end}章）</span><ol>')
         for n, title, _ in parsed:
@@ -265,9 +310,21 @@ def main():
             chapter_xhtml = xhtml_doc(title, render_chapter(title, blocks))
             z.writestr(f"OEBPS/ch{n:03d}.xhtml", chapter_xhtml, compress_type=zipfile.ZIP_DEFLATED)
 
+    with zipfile.ZipFile(epub_path) as z:
+        chapter_entries = [
+            name for name in z.namelist()
+            if re.fullmatch(r"OEBPS/ch\d{3}\.xhtml", name)
+        ]
+        expected_entries = [f"OEBPS/ch{n:03d}.xhtml" for n in range(1, 451)]
+        if chapter_entries != expected_entries:
+            raise SystemExit("EPUB chapter entries are not exactly ch001..ch450 once each")
+        if z.infolist()[0].filename != "mimetype" or z.infolist()[0].compress_type != zipfile.ZIP_STORED:
+            raise SystemExit("EPUB mimetype entry is not first and uncompressed")
+
     print(f"Built {epub_path}")
     print(f"Built {txt_path}")
     print(f"Chapters: {len(parsed)} ({nums[0]}..{nums[-1]})")
+    print("Canonical duplicate resolution: chapters 311..320 fixed")
 
 
 if __name__ == "__main__":
